@@ -12,6 +12,16 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+type BpfAddrRequestT struct {
+	Name           [64]uint8
+	AddrinfoPtrPtr uint64
+}
+
+type BpfDnsEntryT struct {
+	Name [64]uint8
+	Ip   [16]uint8
+}
+
 // LoadBpf returns the embedded CollectionSpec for Bpf.
 func LoadBpf() (*ebpf.CollectionSpec, error) {
 	reader := bytes.NewReader(_BpfBytes)
@@ -61,8 +71,8 @@ type BpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type BpfMapSpecs struct {
-	OngoingCalls *ebpf.MapSpec `ebpf:"ongoing_calls"`
-	Resolved     *ebpf.MapSpec `ebpf:"resolved"`
+	Ongoings *ebpf.MapSpec `ebpf:"ongoings"`
+	Resolved *ebpf.MapSpec `ebpf:"resolved"`
 }
 
 // BpfObjects contains all objects after they have been loaded into the kernel.
@@ -84,13 +94,13 @@ func (o *BpfObjects) Close() error {
 //
 // It can be passed to LoadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type BpfMaps struct {
-	OngoingCalls *ebpf.Map `ebpf:"ongoing_calls"`
-	Resolved     *ebpf.Map `ebpf:"resolved"`
+	Ongoings *ebpf.Map `ebpf:"ongoings"`
+	Resolved *ebpf.Map `ebpf:"resolved"`
 }
 
 func (m *BpfMaps) Close() error {
 	return _BpfClose(
-		m.OngoingCalls,
+		m.Ongoings,
 		m.Resolved,
 	)
 }
