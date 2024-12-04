@@ -2,17 +2,24 @@ package addrinfo
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
+	"github.com/mariomac/pipes/pipe"
+
+	"github.com/mariomac/rdns/pkg/config"
+	"github.com/mariomac/rdns/pkg/store"
 )
 
 //go:generate bpf2go -cc $BPF_CLANG -cflags $BPF_CFLAGS -target amd64,arm64 -type dns_entry_t Bpf ../../../bpf/src/addrinfo.c -- -I../../../bpf/include
@@ -23,10 +30,84 @@ func log() *slog.Logger {
 	)
 }
 
+func AddrInfoProvider(ctx context.Context, cfg *config.Config) pipe.StartProvider[store.DNSEntry] {
+	return func() (pipe.StartFunc[store.DNSEntry], error) {
+		log := log()
+		if !slices.Contains(cfg.Resolvers, config.ResolverGetAddrInfo) {
+			log.Debug("getaddrinfo resolver is not enabled, ignoring this stage")
+			return pipe.IgnoreStart[store.DNSEntry](), nil
+		}
+
+		// Instantiating the eBPF tracer and allocating resources
+		tracer, err := newTracer(log)
+		if err != nil {
+			return nil, fmt.Errorf("instantiating eBPF tracer: %w", err)
+		}
+
+		return func(out chan<- store.DNSEntry) {
+			defer tracer.Close()
+			log.Debug("listening to getaddrinfo resolver")
+			for {
+				// check for context cancellation
+				go tracer.readNext()
+				select {
+				case <-ctx.Done():
+					log.Debug("context cancelled, exiting..")
+					return
+				case err := <-tracer.readErrors:
+					if errors.Is(err, ringbuf.ErrClosed) {
+						log.Debug("ringbuf closed. Exiting..")
+						return
+					}
+					log.Error("reading from ringbuf", err)
+					continue
+				case entry := <-tracer.readEntries:
+					end := bytes.IndexByte(entry.Name[:], 0)
+					if end == -1 {
+						end = len(entry.Name)
+					}
+					de := store.DNSEntry{
+						HostName: string(entry.Name[:end]),
+						// TODO: getaddrinfo can return multiple IPs. Amend the BPF program for it
+						// TODO: support IPv6
+						IPs: []string{net.IP(entry.Ip[:4]).String()},
+					}
+					log.Debug("received DNS entry", "host", de.HostName, "ip", de.IPs[0])
+					out <- de
+				}
+			}
+		}, nil
+	}
+}
+
 type tracer struct {
+	log        *slog.Logger
 	bpfObjects BpfObjects
 	uprobe     link.Link
 	uretprobe  link.Link
+	ringbuf    *ringbuf.Reader
+
+	readEntries chan BpfDnsEntryT
+	readErrors  chan error
+}
+
+func newTracer(log *slog.Logger) (*tracer, error) {
+	t := tracer{
+		log:         log,
+		readErrors:  make(chan error),
+		readEntries: make(chan BpfDnsEntryT),
+	}
+	if err := t.register(); err != nil {
+		return nil, fmt.Errorf("registering eBPF tracer: %w", err)
+	}
+	log.Debug("creating ringbuf reader")
+	var err error
+	t.ringbuf, err = ringbuf.NewReader(t.bpfObjects.Resolved)
+	if err != nil {
+		_ = t.Close()
+		return nil, fmt.Errorf("creating ringbuf reader: %w", err)
+	}
+	return &t, nil
 }
 
 func (t *tracer) register() error {
@@ -66,55 +147,29 @@ func (t *tracer) register() error {
 	return nil
 }
 
-func (t *tracer) Close() error {
-	var errs []string
-	if t.uprobe != nil {
-		if err := t.uprobe.Close(); err != nil {
-			errs = append(errs, err.Error())
-		}
+func (t *tracer) readNext() {
+	record, err := t.ringbuf.Read()
+	if err != nil {
+		t.readErrors <- err
 	}
-	if err := t.bpfObjects.Close(); err != nil {
-		errs = append(errs, err.Error())
+	input := bytes.NewBuffer(record.RawSample)
+	dnsEntry := BpfDnsEntryT{}
+	if err := binary.Read(input, binary.LittleEndian, &dnsEntry); err != nil {
+		t.log.Error("reading ringbuf event", "error", err)
 	}
-	if len(errs) > 0 {
-		return fmt.Errorf("closing BPF resources: '%s'", strings.Join(errs, "', '"))
-	}
-	return nil
+	t.readEntries <- dnsEntry
 }
 
-func Trace() (func(), error) {
-	log := log()
-	t := tracer{}
-	if err := t.register(); err != nil {
-		return nil, fmt.Errorf("registering eBPF tracer: %w", err)
-	}
-	log.Debug("creating ringbuf reader")
-	rd, err := ringbuf.NewReader(t.bpfObjects.Resolved)
-	if err != nil {
-		_ = t.Close()
-		return nil, fmt.Errorf("creating ringbuf reader: %w", err)
-	}
-	return func() {
-		defer t.Close()
-		// TODO: set proper context-based cancellation
-		log.Debug("reading ringbuf events")
-		for {
-			record, err := rd.Read()
-			if err != nil {
-				if errors.Is(err, ringbuf.ErrClosed) {
-					log.Debug("Received signal, exiting..")
-					return
-				}
-				log.Error("reading from ringbuf", err)
-				continue
-			}
-			input := bytes.NewBuffer(record.RawSample)
-			dnsEntry := BpfDnsEntryT{}
-			if err := binary.Read(input, binary.LittleEndian, &dnsEntry); err != nil {
-				log.Error("reading ringbuf event", "error", err)
-				continue
-			}
-			fmt.Printf("%s -> %v\n", string(dnsEntry.Name[:]), dnsEntry.Ip[:4])
+func (t *tracer) Close() error {
+	t.log.Debug("closing uprobe")
+	if t.uprobe != nil {
+		if err := t.uprobe.Close(); err != nil {
+			t.log.Error("closing uprobe", "error", err)
 		}
-	}, nil
+	}
+	t.log.Debug("closing BPF objects")
+	if err := t.bpfObjects.Close(); err != nil {
+		t.log.Error("closing BPF objects", "error", err)
+	}
+	return nil
 }
