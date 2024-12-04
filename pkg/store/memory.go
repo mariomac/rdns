@@ -1,7 +1,6 @@
 package store
 
 import (
-	"fmt"
 	"sync"
 
 	"github.com/mariomac/rdns/pkg/helpers/maps"
@@ -30,7 +29,6 @@ func (im *InMemory) PipelineStage(in <-chan DNSEntry) {
 		im.access.Lock()
 		for _, ip := range entry.IPs {
 			// TODO: store IPv4 also with its IPv6 representation
-			fmt.Println("Storing", ip, entry.HostName)
 			im.entries.Put(ip, entry.HostName, struct{}{})
 		}
 		im.access.Unlock()

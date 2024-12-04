@@ -3,12 +3,14 @@ package rdns
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/mariomac/pipes/pipe"
 
 	"github.com/mariomac/rdns/pkg/config"
 	"github.com/mariomac/rdns/pkg/ebpf/addrinfo"
 	"github.com/mariomac/rdns/pkg/ebpf/xdp"
+	"github.com/mariomac/rdns/pkg/query"
 	"github.com/mariomac/rdns/pkg/store"
 )
 
@@ -28,6 +30,8 @@ func (p *Pipeline) Connect() {
 }
 
 func Run(ctx context.Context, cfg *config.Config) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	store := store.NewInMemory()
 
 	builder := pipe.NewBuilder(&Pipeline{})
@@ -39,6 +43,15 @@ func Run(ctx context.Context, cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("building pipeline: %w", err)
 	}
+
+	go func() {
+		slog.Info("starting HTTP server", "port", cfg.HttpPort)
+		if err := query.HttpJsonServer(store, cfg.HttpPort); err != nil {
+			slog.Error("running HTTP server. Exiting", "error", err)
+			cancel()
+		}
+	}()
+
 	run.Start()
 	<-run.Done()
 	return nil
