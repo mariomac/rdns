@@ -11,175 +11,179 @@
 // For reference, see:
 // https://datatracker.ietf.org/doc/html/rfc1035
 
+enum { DEBUG = 0 };
+
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
 struct {
-    __uint(type, BPF_MAP_TYPE_RINGBUF);
-    __uint(max_entries, 256 * 1024);
+	__uint(type, BPF_MAP_TYPE_RINGBUF);
+	__uint(max_entries, 256 * 1024);
 } ring_buffer SEC(".maps");
 
 enum {
-    // the DNS header is made of 6 16-bit words
-    k_dns_header_size = 6 * sizeof(__u16),
+	// the DNS header is made of 6 16-bit words
+	DNS_HEADER_SIZE = 6 * sizeof(__u16),
 };
 
 enum offsets {
-    kQROffset = 7,
-    kOpcodeOffset = 3,
-    kOpcodeMask = 0xf,
-    kAAOffset = 2,
-    kTCOffset = 1,
-    kRDOffset = 0,
-    kRAOffset = 7,
-    kZOffset = 4,
-    kZMask = 0x7,
-    kRCodeOffset = 0,
-    kRCodeMask = 0xf
+	QR_OFFSET = 7,
+	OPCODE_OFFSET = 3,
+	OPCODE_MASK = 0xf,
+	AA_OFFSET = 2,
+	TC_OFFSET = 1,
+	RD_OFFSET = 0,
+	RA_OFFSET = 7,
+	Z_OFFSET = 4,
+	Z_MASK = 0x7,
+	RCODE_OFFSET = 0,
+	RCODE_MASK = 0xf
 };
 
-enum dns_qr { k_qr_query = 0, k_qr_response = 1 };
-
-enum dns_opcode { k_op_query = 0, k_op_iquery = 1, k_op_status = 2 };
-
-enum { rb_record_len = 256 };
+enum { QR_QUERY = 0, QR_RESPONSE = 1 };
+enum { OP_QUERY = 0, OP_IQUERY = 1, OP_STATUS = 2 };
+enum { RB_RECORD_LEN = 256 };
+enum { DNS_PORT = 53 };
+enum { UDP_HDR_SIZE = sizeof(struct udphdr), DNS_HDR_SIZE = 12 };
 
 static __always_inline __u8 get_bit(__u8 word, __u8 offset) {
-    return (word >> offset) & 0x1;
+	return (word >> offset) & 0x1;
 }
 
 static __always_inline void *ctx_data(struct xdp_md *ctx) {
-    void *data;
+	void *data;
 
-    asm("%[res] = *(u32 *)(%[base] + %[offset])"
-        : [res] "=r"(data)
-        : [base] "r"(ctx), [offset] "i"(offsetof(struct xdp_md, data)), "m"(*ctx));
+	asm("%[res] = *(u32 *)(%[base] + %[offset])"
+			: [res] "=r"(data)
+			: [base] "r"(ctx), [offset] "i"(offsetof(struct xdp_md, data)), "m"(*ctx));
 
-    return data;
+	return data;
 }
 
 static __always_inline void *ctx_data_end(struct xdp_md *ctx) {
-    void *data_end;
+	void *data_end;
 
-    asm("%[res] = *(u32 *)(%[base] + %[offset])"
-        : [res] "=r"(data_end)
-        : [base] "r"(ctx), [offset] "i"(offsetof(struct xdp_md, data_end)), "m"(*ctx));
+	asm("%[res] = *(u32 *)(%[base] + %[offset])"
+			: [res] "=r"(data_end)
+			: [base] "r"(ctx), [offset] "i"(offsetof(struct xdp_md, data_end)), "m"(*ctx));
 
-    return data_end;
-}
-
-__attribute__((unused)) static __always_inline struct ethhdr *eth_header(struct xdp_md *ctx) {
-    void *data = ctx_data(ctx);
-
-    return (data + sizeof(struct ethhdr) > ctx_data_end(ctx)) ? NULL : data;
+	return data_end;
 }
 
 static __always_inline struct iphdr *ip_header(struct xdp_md *ctx) {
-    void *data = ctx_data(ctx);
+	void *data = ctx_data(ctx);
 
-    data += sizeof(struct ethhdr);
+	data += sizeof(struct ethhdr);
 
-    return (data + sizeof(struct iphdr) > ctx_data_end(ctx)) ? NULL : data;
+	return (data + sizeof(struct iphdr) > ctx_data_end(ctx)) ? NULL : data;
 }
 
 static __always_inline struct udphdr *udp_header(struct xdp_md *ctx) {
-    struct iphdr *iph = ip_header(ctx);
+	struct iphdr *iph = ip_header(ctx);
 
-    if (!iph)
-        return NULL;
+	if (!iph)
+		return NULL;
 
-    if (iph->protocol != IPPROTO_UDP)
-        return NULL;
+	if (iph->protocol != IPPROTO_UDP)
+		return NULL;
 
-    const __u32 advance = iph->ihl * 4;
+	const __u32 advance = iph->ihl * 4;
 
-    void *data = (void *)iph + advance;
+	void *data = (void *)iph + advance;
 
-    return (data + sizeof(struct udphdr) > ctx_data_end(ctx)) ? NULL : data;
+	return (data + sizeof(struct udphdr) > ctx_data_end(ctx)) ? NULL : data;
 };
 
 static __always_inline __u32 validate_qsection(struct xdp_md *ctx, const unsigned char *data) {
-    __u32 size = 0;
+	__u32 size = 0;
 
-    // try at most 16 sections
-    for (__u8 i = 0; i < 16; ++i) {
-        if ((void*)data >= ctx_data_end(ctx)) {
-            return 0;
-        }
+	// try at most 16 sections
+	for (__u8 i = 0; i < 16; ++i) {
+		if ((void*)data >= ctx_data_end(ctx)) {
+			return 0;
+		}
 
-        const __u8 len = data[0];
+		const __u8 len = data[0];
 
-        ++size;
-        ++data;
+		++size;
+		++data;
 
-        if (len == 0) {
-            size += 4; // account for QTYPE and QCLASS
-            if ((void*)(data + size) < ctx_data_end(ctx)) {
-                return size;
-            } else {
-                return 0;
-            }
-        }
+		if (len == 0) {
+			size += sizeof(__u16); // account for QTYPE and QCLASS
 
-        data += len;
-        size += len;
-    }
+			if ((void*)(data + sizeof(__u16)) < ctx_data_end(ctx)) {
+				return size;
+			} else {
+				return 0;
+			}
+		}
 
-    return 0;
+		data += len;
+		size += len;
+	}
+
+	return 0;
 }
 
+[[maybe_unused]]
 static __always_inline __u32 validate_asection(struct xdp_md *ctx, const unsigned char *data) {
-    __u32 size = 0;
-    __u8 name_records_ok = 0;
+	__u32 size = 0;
+	__u8 name_records_ok = 0;
 
-    unsigned char *end = ctx_data_end(ctx);
+	unsigned char *end = ctx_data_end(ctx);
 
-    // try at most 16 sections
-    for (__u8 i = 0; i < 16; ++i) {
-        if (data >= end) {
-            return 0;
-        }
+	if (data >= end) {
+		return 0;
+	}
 
-        const __u8 len = data[0];
+	// try at most 16 sections
+	for (__u8 i = 0; i < 16; ++i) {
+		if (data >= end) {
+			return 0;
+		}
 
-        // check for compressed section
-        if ((len & 0xf000) == 0xc000) {
-            // advance two octets
-            data += 2;
-            size += 2;
-            continue;
-        }
+		const __u8 len = data[0];
 
-        // regular section
-        ++size;
-        ++data;
+		// check for compressed section
+		if ((len & 0xf000) == 0xc000) {
+			// advance two octets
+			data += 2;
+			size += 2;
+			continue;
+		}
 
-        if (len == 0) {
-            name_records_ok = 1;
-            break;
-        }
+		// regular section
+		++size;
+		++data;
 
-        data += len;
-        size += len;
-    }
+		if (len == 0) {
+			name_records_ok = 1;
+			break;
+		}
 
-    // something wrong parsing the NAME records
-    if (!name_records_ok) {
-        return 0;
-    }
+		data += len;
+		size += len;
+	}
 
-    // skip over TYPE, CLASS and TTL
-    const __u32 skip_size = sizeof(__u16) * 3;
-    size += skip_size;
-    data += skip_size;
+	// something wrong parsing the NAME records
+	if (!name_records_ok) {
+		return 0;
+	}
 
-    // check if we can have RDLENGTH and RDATA
-    if ((void*)(data + sizeof(__u16)) > ctx_data_end(ctx)) {
-        return 0;
-    }
+	// skip over TYPE, CLASS and TTL
+	const __u32 skip_size = sizeof(__u16) * 3;
+	size += skip_size;
+	data += skip_size;
 
-    const __u16 rdlen = bpf_ntohs(*(const __be16 *)(data));
+	// check if we can have RDLENGTH and RDATA
+	if ((void*)(data + sizeof(__u16)) > ctx_data_end(ctx)) {
+		return 0;
+	}
 
-    bpf_printk("RDLEN: %u\n", rdlen);
+	const __u16 rdlen = bpf_ntohs(*(const __be16 *)(data));
+
+	if (DEBUG) {
+		bpf_printk("RDLEN: %u\n", rdlen);
+	}
 
 #if 0
 	data += rdlen;
@@ -189,60 +193,65 @@ static __always_inline __u32 validate_asection(struct xdp_md *ctx, const unsigne
 	}
 #endif
 
-    return size + rdlen;
+	return size + rdlen;
 }
 
 static __always_inline void
-parse_dns_response(struct xdp_md *ctx, const unsigned char *data, __u32 size) {
-    const __u8 flags0 = *(data + 2);
-    const __u8 flags1 = *(data + 3);
+parse_dns_response(struct xdp_md *ctx, const unsigned char * const data, __u32 size) {
+	const __u8 flags0 = *(data + 2);
+	const __u8 flags1 = *(data + 3);
 
-    const __u16 id = bpf_ntohs(*(const __be16 *)(data));
-    const __u8 qr = get_bit(flags0, kQROffset);
-    const __u8 opcode = (flags0 >> kOpcodeOffset) & kOpcodeMask;
-    const __u8 aa = get_bit(flags0, kAAOffset);
-    const __u8 tc = get_bit(flags0, kTCOffset);
-    const __u8 rd = get_bit(flags0, kRDOffset);
-    const __u8 ra = get_bit(flags1, kRAOffset);
-    const __u8 z = (flags1 >> kZOffset) & kZMask;
-    const __u8 rcode = (flags1 >> kRCodeOffset) & kRCodeMask;
-    const __u16 qdcount = bpf_ntohs(*(const __be16 *)(data + 4));
-    const __u16 ancount = bpf_ntohs(*(const __be16 *)(data + 6));
+	const __u16 id = bpf_ntohs(*(const __be16 *)(data));
+	const __u8 qr = get_bit(flags0, QR_OFFSET);
+	const __u8 opcode = (flags0 >> OPCODE_OFFSET) & OPCODE_MASK;
+	const __u8 aa = get_bit(flags0, AA_OFFSET);
+	const __u8 tc = get_bit(flags0, TC_OFFSET);
+	const __u8 rd = get_bit(flags0, RD_OFFSET);
+	const __u8 ra = get_bit(flags1, RA_OFFSET);
+	const __u8 z = (flags1 >> Z_OFFSET) & Z_MASK;
+	const __u8 rcode = (flags1 >> RCODE_OFFSET) & RCODE_MASK;
+	const __u16 qdcount = bpf_ntohs(*(const __be16 *)(data + 4));
+	const __u16 ancount = bpf_ntohs(*(const __be16 *)(data + 6));
 
-    // heuristic check to see if this is a DNS response
-    if (qr != k_qr_response || opcode != k_op_query || z != 0 || rcode != 0 || qdcount == 0 ||
-        ancount == 0) {
-        return;
-    }
+	// heuristic check to see if this is a DNS response
+	if (qr != QR_RESPONSE || opcode != OP_QUERY || z != 0 || rcode != 0 || qdcount == 0 ||
+			ancount == 0) {
+		return;
+	}
 
-#if 0
-	bpf_printk("Found possible DNS response: %x!\n", id);
+	if (DEBUG) {
+		bpf_printk("Found possible DNS response: %x!\n", id);
+		bpf_printk("flags[0] = %x\n", flags0);
+		bpf_printk("id: %x, qr: %u, opcode: %u, aa: %u, tc: %u, rd: %u, ra: %u\n",
+				id, qr, opcode, aa, tc, rd, ra);
+		bpf_printk("flags[1] = %x\n", flags1);
+		bpf_printk("z: %u, rcode: %u, qdcount = %u, ancount = %u\n", z, rcode, ancount, qdcount);
+	}
 
-	bpf_printk("flags[0] = %x\n", flags0);
-	bpf_printk("id: %x, qr: %u, opcode: %u, aa: %u, tc: %u, rd: %u, ra: %u\n",
-			id, qr, opcode, aa, tc, rd, ra);
+	__u32 dns_packet_size = 0;
 
-	bpf_printk("flags[1] = %x\n", flags1);
-	bpf_printk("z: %u, rcode: %u, qdcount = %u, ancount = %u\n", z, rcode, ancount, qdcount);
-#endif
+	const unsigned char *ptr = data + DNS_HEADER_SIZE;
 
-    __u32 dns_packet_size = 0;
+	for (__u8 i = 0; i < 4 && i < qdcount; ++i) {
+		const __u32 qsection_size = validate_qsection(ctx, ptr);
 
-    const unsigned char *base = data + k_dns_header_size;
-    const unsigned char *ptr = base;
+		if (qsection_size == 0) {
+			if (DEBUG) {
+				bpf_printk("invalid qsection, bailing...\n");
+			}
 
-    for (__u8 i = 0; i < 4 && i < qdcount; ++i) {
-        const __u32 qsection_size = validate_qsection(ctx, ptr);
+			return;
+		}
 
-        if (qsection_size == 0)
-            return;
+		dns_packet_size += qsection_size;
+		ptr += qsection_size;
+	}
 
-        dns_packet_size += qsection_size;
-        ptr += qsection_size;
-    }
+	if (DEBUG) {
+		bpf_printk("found qsection size = %u\n", dns_packet_size);
+	}
 
-    bpf_printk("found qsection size = %u\n", dns_packet_size);
-
+	// FIXME
 #if 0
 	for (__u8 i = 0; i < 8 && i < ancount; ++i) {
 		const __u32 asection_size = validate_asection(ctx, ptr);
@@ -255,58 +264,58 @@ parse_dns_response(struct xdp_md *ctx, const unsigned char *data, __u32 size) {
 	}
 #endif
 
-    const unsigned char *begin = ctx_data(ctx);
-    const unsigned char *end = ctx_data_end(ctx);
+	const unsigned char *begin = ctx_data(ctx);
+	const unsigned char *end = ctx_data_end(ctx);
 
-    __u32 data_len = end - base & 0xffff;
+	const __u32 data_len = end - data & 0xffff;
 
-    if (data_len == 0)
-        return;
+	if (data_len == 0 || data_len > RB_RECORD_LEN)
+		return;
 
-    if (data_len + sizeof(data_len) > rb_record_len)
-        return;
+	const __u32 data_offset = data - begin;
 
-    const __u32 data_offset = base - begin;
+	unsigned char *buf = bpf_ringbuf_reserve(&ring_buffer, RB_RECORD_LEN, 0);
 
-    unsigned char *buf = bpf_ringbuf_reserve(&ring_buffer, rb_record_len, 0);
+	if (!buf) {
+		if (DEBUG) {
+			bpf_printk("Failed to reserve %u bytes in the ring buffer\n", RB_RECORD_LEN);
+		}
 
-    if (!buf) {
-        bpf_printk("Failed to reserve %u bytes in the ring buffer\n", rb_record_len);
-        return;
-    }
+		return;
+	}
 
-    __builtin_memcpy(buf, &data_len, sizeof(data_len));
+	bpf_xdp_load_bytes(ctx, data_offset, buf, data_len);
 
-    bpf_xdp_load_bytes(ctx, data_offset, buf + sizeof(data_len), data_len);
-
-    bpf_ringbuf_submit(buf, 0);
+	bpf_ringbuf_submit(buf, 0);
 }
 
 SEC("xdp")
-int hello(struct xdp_md *ctx) {
-    const struct udphdr *udp = udp_header(ctx);
+int dns_response_tracker(struct xdp_md *ctx) {
+	const struct udphdr *udp = udp_header(ctx);
 
-    if (!udp)
-        return XDP_PASS;
+	if (!udp)
+		return XDP_PASS;
 
-    const __u16 source = bpf_ntohs(udp->source);
+	const __u16 source = bpf_ntohs(udp->source);
 
-    if (source != 53)
-        return XDP_PASS;
+	if (source != DNS_PORT)
+		return XDP_PASS;
 
-    const __u16 udp_len = bpf_ntohs(udp->len);
+	const __u16 udp_len = bpf_ntohs(udp->len);
 
-    bpf_printk("udp_len: %u\n", udp_len);
+	if (DEBUG) {
+		bpf_printk("udp_len: %u\n", udp_len);
+	}
 
-    if (udp_len < 40) {
-        return XDP_PASS;
-    }
+	if (udp_len < (UDP_HDR_SIZE + DNS_HDR_SIZE)) {
+		return XDP_PASS;
+	}
 
-    if ((void *)udp + 40 > ctx_data_end(ctx)) {
-        return XDP_PASS;
-    }
+	if ((void *)udp + UDP_HDR_SIZE + DNS_HDR_SIZE >= ctx_data_end(ctx)) {
+		return XDP_PASS;
+	}
 
-    parse_dns_response(ctx, (unsigned char *)(udp) + 8, udp_len - 8);
+	parse_dns_response(ctx, (unsigned char *)(udp) + UDP_HDR_SIZE, udp_len - UDP_HDR_SIZE);
 
-    return XDP_PASS;
+	return XDP_PASS;
 }

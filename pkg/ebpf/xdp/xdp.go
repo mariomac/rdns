@@ -2,17 +2,19 @@ package xdp
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"net"
 	"log/slog"
 	"slices"
+
+	"github.com/cilium/ebpf/ringbuf"
 
 	"github.com/mariomac/pipes/pipe"
 
 	"github.com/mariomac/rdns/pkg/config"
 	"github.com/mariomac/rdns/pkg/store"
 )
-
-// $BPF_CLANG and $BPF_CFLAGS are set by the Makefile.
-//go:generate bpf2go -cc $BPF_CLANG -cflags $BPF_CFLAGS -target amd64,arm64 Bpf ../../../bpf/src/rdns.c -- -I../../../bpf/include
 
 func log() *slog.Logger {
 	return slog.With("component", "xdp.PacketResolver")
@@ -28,10 +30,79 @@ func PacketResolverProvider(ctx context.Context, cfg *config.Config) pipe.StartP
 
 		// todo: instantiate here the eBPF tracer and return any possible error
 
+		tracer, err := newTracer()
+
+		if err != nil {
+			return nil, fmt.Errorf("instantiating XDP tracer: %w", err)
+		}
+
 		return func(out chan<- store.DNSEntry) {
-			log.Debug("listening to packet resolver")
-			// TODO: forward here any new DNS entry received from the eBPF tracer
-			// (check addrInfo as example)
+			tracerLoop(ctx, out, tracer)
 		}, nil
 	}
+}
+
+func tracerLoop(ctx context.Context, out chan<- store.DNSEntry, tracer *tracer) {
+	defer tracer.Close()
+
+	log := log()
+
+	log.Debug("listening to packet resolver")
+
+	record := ringbuf.Record{}
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Debug("context cancelled, exiting..")
+			return
+		default:
+		}
+
+		err := tracer.ringbuf.ReadInto(&record)
+
+		if err != nil {
+			if errors.Is(err, ringbuf.ErrClosed) {
+				log.Debug("ringbuf closed, exiting..")
+				return
+			}
+
+			log.Error("reading from ringbuf", err)
+			continue
+		}
+
+		entry := handleDNSMessage(&record)
+
+		if entry != nil {
+			out <- *entry
+		}
+	}
+}
+
+func handleDNSMessage(rd *ringbuf.Record) *store.DNSEntry {
+	dnsMessage := parseDNSMessage(rd.RawSample)
+
+	if dnsMessage == nil || len(dnsMessage.questions) == 0 {
+		return nil
+	}
+
+	entry := store.DNSEntry{
+		HostName: dnsMessage.questions[0].qName,
+		IPs: make([]string, 0, len(dnsMessage.answers)),
+	}
+
+	for _, answer := range dnsMessage.answers {
+		if answer.typ != Type_A {
+			continue
+		}
+
+		ipStr := net.IP(answer.data).String()
+		entry.IPs = append(entry.IPs, ipStr)
+	}
+
+	if len(entry.IPs) == 0 {
+		return nil
+	}
+
+	return &entry
 }

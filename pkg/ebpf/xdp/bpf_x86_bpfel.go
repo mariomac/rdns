@@ -53,7 +53,7 @@ type BpfSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type BpfProgramSpecs struct {
-	Hello *ebpf.ProgramSpec `ebpf:"hello"`
+	DnsResponseTracker *ebpf.ProgramSpec `ebpf:"dns_response_tracker"`
 }
 
 // BpfMapSpecs contains maps before they are loaded into the kernel.
@@ -95,12 +95,12 @@ func (m *BpfMaps) Close() error {
 //
 // It can be passed to LoadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type BpfPrograms struct {
-	Hello *ebpf.Program `ebpf:"hello"`
+	DnsResponseTracker *ebpf.Program `ebpf:"dns_response_tracker"`
 }
 
 func (p *BpfPrograms) Close() error {
 	return _BpfClose(
-		p.Hello,
+		p.DnsResponseTracker,
 	)
 }
 
