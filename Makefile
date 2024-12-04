@@ -6,6 +6,9 @@ GOARCH ?= amd64
 
 LOCAL_GENERATOR_IMAGE ?= ghcr.io/grafana/beyla-generator:main
 
+IMG ?= docker.io/mariomac/rdns:dev
+IMG_PLATFORMS ?= linux/amd64,linux/arm64
+IMG_PUSH ?= --push
 
 # BPF code generator dependencies
 CILIUM_EBPF_VERSION := v0.16.0
@@ -36,3 +39,9 @@ docker-generate:
 compile:
 	@echo "### Compiling project"
 	GOOS=$(GOOS) GOARCH=$(GOARCH) go build -mod vendor -ldflags -a -o bin/$(CMD) $(MAIN_GO_FILE)
+
+.PHONY: image-build-push
+image-build-push:
+	@echo "### Building and pushing the auto-instrumenter image"
+	$(call check_defined, IMG_ORG, Your Docker repository user name)
+	docker buildx build ${IMG_PUSH} --platform ${IMG_PLATFORMS} -t ${IMG} .
