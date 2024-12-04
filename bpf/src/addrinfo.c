@@ -81,8 +81,8 @@ int BPF_KRETPROBE(uretprobe_getaddrinfo, int ret) { //struct addrinfo **pai
     if (bpf_probe_read(&ai, sizeof(ai), (void *)addr_ptr) < 0) {
         bpf_printk("Failed to read addr_ptr\n");
         return 0;
-    }         
-    if (ai.ai_addr == NULL) {
+    }
+    if (ai.ai_addr == (u64) NULL) {
         bpf_printk("ai_addr is NULL %ld\n", ai.ai_addrlen);
         return 0;
     }
@@ -92,7 +92,7 @@ int BPF_KRETPROBE(uretprobe_getaddrinfo, int ret) { //struct addrinfo **pai
     // if (bpf_probe_read(&ai, sizeof(ai), (void *)ai.ai_next) < 0) {
     //     bpf_printk("Failed to read addr->ai_next\n");
     //     return 0;
-    // }     
+    // }
     // Assuming ipv4: TODO: check ai_family == AF_INET or ipv6
     struct sockaddr_in sa;
     if (bpf_probe_read(&sa, sizeof(sa), (void *)ai.ai_addr) < 0) {
