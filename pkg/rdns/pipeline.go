@@ -17,27 +17,28 @@ import (
 type Pipeline struct {
 	packetResolver      pipe.Start[store.DNSEntry]
 	getAddrInfoResolver pipe.Start[store.DNSEntry]
-	inMemoryStore       pipe.Final[store.DNSEntry]
+	store               pipe.Final[store.DNSEntry]
 }
 
-func (p *Pipeline) Packet() *pipe.Start[store.DNSEntry]        { return &p.packetResolver }
-func (p *Pipeline) GetAddrInfo() *pipe.Start[store.DNSEntry]   { return &p.getAddrInfoResolver }
-func (p *Pipeline) InMemoryStore() *pipe.Final[store.DNSEntry] { return &p.inMemoryStore }
+func (p *Pipeline) Packet() *pipe.Start[store.DNSEntry]      { return &p.packetResolver }
+func (p *Pipeline) GetAddrInfo() *pipe.Start[store.DNSEntry] { return &p.getAddrInfoResolver }
+func (p *Pipeline) Store() *pipe.Final[store.DNSEntry]       { return &p.store }
 
 func (p *Pipeline) Connect() {
-	p.packetResolver.SendTo(p.inMemoryStore)
-	p.getAddrInfoResolver.SendTo(p.inMemoryStore)
+	p.packetResolver.SendTo(p.store)
+	p.getAddrInfoResolver.SendTo(p.store)
 }
 
 func Run(ctx context.Context, cfg *config.Config) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	store := store.NewInMemory()
+
+	store := selectStore(ctx, cfg)
 
 	builder := pipe.NewBuilder(&Pipeline{})
 	pipe.AddStartProvider(builder, (*Pipeline).Packet, xdp.PacketResolverProvider(ctx, cfg))
 	pipe.AddStartProvider(builder, (*Pipeline).GetAddrInfo, addrinfo.AddrInfoProvider(ctx, cfg))
-	pipe.AddFinal(builder, (*Pipeline).InMemoryStore, store.PipelineStage)
+	pipe.AddFinal(builder, (*Pipeline).Store, store.PipelineStage)
 
 	run, err := builder.Build()
 	if err != nil {
@@ -55,4 +56,16 @@ func Run(ctx context.Context, cfg *config.Config) error {
 	run.Start()
 	<-run.Done()
 	return nil
+}
+
+type storage interface {
+	PipelineStage(in <-chan store.DNSEntry)
+	GetHostnames(ip string) []string
+}
+
+func selectStore(ctx context.Context, cfg *config.Config) storage {
+	if cfg.RedisAddress != "" {
+		return store.NewRedis(ctx, cfg.RedisAddress, cfg.RedisUser, cfg.RedisPassword)
+	}
+	return store.NewInMemory()
 }

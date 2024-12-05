@@ -7,13 +7,19 @@ query hostnames by IP addresses that have been previously resolved in your host.
 
 ## How to compile and run
 
+Full environment with persistent storage:
+
+```
+docker compose up
+```
+
 CLI:
 ```
 make compile
 RDNS_LOG_LEVEL=debug sudo -E ./bin/rdns
 ```
 
-Docker:
+Docker standalone container:
 ```
 docker build -t docker.io/mariomac/rdns:dev .
 docker run --network=host -it --privileged -e RDNS_LOG_LEVEL=debug -p 8080:8080 docker.io/mariomac/rdns:dev
