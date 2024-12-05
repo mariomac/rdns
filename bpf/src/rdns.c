@@ -124,76 +124,30 @@ static __always_inline __u32 validate_qsection(struct xdp_md *ctx, const unsigne
 	return 0;
 }
 
-[[maybe_unused]]
-static __always_inline __u32 validate_asection(struct xdp_md *ctx, const unsigned char *data) {
-	__u32 size = 0;
-	__u8 name_records_ok = 0;
+static __always_inline void submit_dns_packet(struct xdp_md *ctx, const unsigned char * const data) {
+	const unsigned char *begin = ctx_data(ctx);
+	const unsigned char *end = ctx_data_end(ctx);
 
-	unsigned char *end = ctx_data_end(ctx);
+	const __u32 data_len = end - data & 0xffff;
 
-	if (data >= end) {
-		return 0;
-	}
+	if (data_len == 0 || data_len > RB_RECORD_LEN)
+		return;
 
-	// try at most 16 sections
-	for (__u8 i = 0; i < 16; ++i) {
-		if (data >= end) {
-			return 0;
+	const __u32 data_offset = data - begin;
+
+	unsigned char *buf = bpf_ringbuf_reserve(&ring_buffer, RB_RECORD_LEN, 0);
+
+	if (!buf) {
+		if (DEBUG) {
+			bpf_printk("Failed to reserve %u bytes in the ring buffer\n", RB_RECORD_LEN);
 		}
 
-		const __u8 len = data[0];
-
-		// check for compressed section
-		if ((len & 0xf000) == 0xc000) {
-			// advance two octets
-			data += 2;
-			size += 2;
-			continue;
-		}
-
-		// regular section
-		++size;
-		++data;
-
-		if (len == 0) {
-			name_records_ok = 1;
-			break;
-		}
-
-		data += len;
-		size += len;
+		return;
 	}
 
-	// something wrong parsing the NAME records
-	if (!name_records_ok) {
-		return 0;
-	}
+	bpf_xdp_load_bytes(ctx, data_offset, buf, data_len);
 
-	// skip over TYPE, CLASS and TTL
-	const __u32 skip_size = sizeof(__u16) * 3;
-	size += skip_size;
-	data += skip_size;
-
-	// check if we can have RDLENGTH and RDATA
-	if ((void*)(data + sizeof(__u16)) > ctx_data_end(ctx)) {
-		return 0;
-	}
-
-	const __u16 rdlen = bpf_ntohs(*(const __be16 *)(data));
-
-	if (DEBUG) {
-		bpf_printk("RDLEN: %u\n", rdlen);
-	}
-
-#if 0
-	data += rdlen;
-
-	if (data >= ctx_data_end(ctx)) {
-		return 0;
-	}
-#endif
-
-	return size + rdlen;
+	bpf_ringbuf_submit(buf, 0);
 }
 
 static __always_inline void
@@ -251,42 +205,7 @@ parse_dns_response(struct xdp_md *ctx, const unsigned char * const data, __u32 s
 		bpf_printk("found qsection size = %u\n", dns_packet_size);
 	}
 
-	// FIXME
-#if 0
-	for (__u8 i = 0; i < 8 && i < ancount; ++i) {
-		const __u32 asection_size = validate_asection(ctx, ptr);
-
-		if (asection_size == 0)
-			return;
-
-		dns_packet_size += asection_size;
-		ptr += asection_size;
-	}
-#endif
-
-	const unsigned char *begin = ctx_data(ctx);
-	const unsigned char *end = ctx_data_end(ctx);
-
-	const __u32 data_len = end - data & 0xffff;
-
-	if (data_len == 0 || data_len > RB_RECORD_LEN)
-		return;
-
-	const __u32 data_offset = data - begin;
-
-	unsigned char *buf = bpf_ringbuf_reserve(&ring_buffer, RB_RECORD_LEN, 0);
-
-	if (!buf) {
-		if (DEBUG) {
-			bpf_printk("Failed to reserve %u bytes in the ring buffer\n", RB_RECORD_LEN);
-		}
-
-		return;
-	}
-
-	bpf_xdp_load_bytes(ctx, data_offset, buf, data_len);
-
-	bpf_ringbuf_submit(buf, 0);
+	submit_dns_packet(ctx, data);
 }
 
 SEC("xdp")
