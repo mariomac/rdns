@@ -199,7 +199,7 @@ func (t *tracer) locateLibC() (string, error) {
 
 	for _, loc := range commonLocations {
 		if _, err := os.Stat(loc); err == nil {
-			return loc, nil // Found the file, return its path
+			return loc, nil
 		}
 	}
 
