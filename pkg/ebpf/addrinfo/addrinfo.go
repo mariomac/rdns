@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"runtime"
+	"os"
 	"slices"
 	"strings"
 
@@ -129,12 +129,13 @@ func (t *tracer) register() error {
 	}
 
 	log.Debug("registering uprobes")
-	// TODO: replace
-	arch := "x86_64-linux-gnu"
-	if runtime.GOARCH == "arm64" {
-		arch = "aarch64-linux-gnu"
+
+	libc, err := t.locateLibC()
+	if err != nil {
+		return err
 	}
-	exec, err := link.OpenExecutable("/usr/lib/" + arch + "/libc.so.6")
+
+	exec, err := link.OpenExecutable(libc)
 	if err != nil {
 		return fmt.Errorf("opening executable: %w", err)
 	}
@@ -172,4 +173,35 @@ func (t *tracer) Close() error {
 		t.log.Error("closing BPF objects", "error", err)
 	}
 	return nil
+}
+
+func (t *tracer) locateLibC() (string, error) {
+	libc, err := ldCacheFind("libc.so.6")
+
+	if err != nil {
+		t.log.Debug("ldCacheFind", "error", err)
+	}
+
+	if libc == "" {
+		t.log.Debug("could not find libc in ldcache, using fallback method")
+	}
+
+	commonLocations := []string{
+		"/lib/libc.so.6",
+		"/lib/x86_64-linux-gnu/libc.so.6",
+		"/lib/i386-linux-gnu/libc.so.6",
+		"/lib/aarch64-linux-gnu/libc.so.6",
+		"/usr/lib/libc.so.6",
+		"/usr/lib/x86_64-linux-gnu/libc.so.6",
+		"/usr/lib/aarch64-linux-gnu/libc.so.6",
+		"/lib64/libc.so.6",
+	}
+
+	for _, loc := range commonLocations {
+		if _, err := os.Stat(loc); err == nil {
+			return loc, nil // Found the file, return its path
+		}
+	}
+
+	return "", fmt.Errorf("could not find libc.so.6")
 }
