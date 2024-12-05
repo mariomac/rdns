@@ -4,7 +4,7 @@ type Config struct {
 	HttpPort int    `env:"RDNS_HTTP_PORT"`
 	LogLevel string `env:"RDNS_LOG_LEVEL"`
 	// valid values: getaddrinfo, packet
-	Resolvers []string `env:"RDNS_RESOLVERS"`
+	Resolvers []string `env:"RDNS_RESOLVERS" envSeparator:","`
 }
 
 const (

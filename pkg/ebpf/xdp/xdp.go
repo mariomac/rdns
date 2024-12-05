@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"log/slog"
+	"net"
 	"os"
 	"slices"
 	"time"
@@ -83,6 +83,7 @@ func tracerLoop(ctx context.Context, out chan<- store.DNSEntry, tracer *tracer) 
 		entry := handleDNSMessage(&record)
 
 		if entry != nil {
+			log.Debug("received DNS entry", "host", entry.HostName, "ips", entry.IPs)
 			out <- *entry
 		}
 	}

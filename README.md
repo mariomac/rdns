@@ -16,8 +16,10 @@ RDNS_LOG_LEVEL=debug sudo -E ./bin/rdns
 Docker:
 ```
 docker build -t docker.io/mariomac/rdns:dev .
-docker run -it --privileged -e RDNS_LOG_LEVEL=debug -p 8080:8080 docker.io/mariomac/rdns:dev
+docker run --network=host -it --privileged -e RDNS_LOG_LEVEL=debug -p 8080:8080 docker.io/mariomac/rdns:dev
 ```
+
+(`--network=host` is only required if you are using the `packet` resolver).
 
 ## How to query
 
