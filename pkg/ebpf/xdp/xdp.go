@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"net"
 	"log/slog"
+	"os"
 	"slices"
+	"time"
 
 	"github.com/cilium/ebpf/ringbuf"
 
@@ -59,12 +61,19 @@ func tracerLoop(ctx context.Context, out chan<- store.DNSEntry, tracer *tracer) 
 		default:
 		}
 
+		// the idea here is to avoid copying 'record' when passing it to a
+		// channel - this allows its allocated memory to be reused by
+		// subsequent ReadInto() calls, allowing the record data to be parsed
+		// in place by parseDNSMessage()
+		tracer.ringbuf.SetDeadline(time.Now().Add(time.Second))
 		err := tracer.ringbuf.ReadInto(&record)
 
 		if err != nil {
 			if errors.Is(err, ringbuf.ErrClosed) {
 				log.Debug("ringbuf closed, exiting..")
 				return
+			} else if errors.Is(err, os.ErrDeadlineExceeded) {
+				continue
 			}
 
 			log.Error("reading from ringbuf", err)

@@ -32,7 +32,6 @@ func readDWord(b *bytes.Buffer) []byte {
 func parseDNSMessage(rawData []byte) *dnsMessage {
 	data := bytes.NewBuffer(rawData)
 
-
 	if (data.Len() < wordSize) {
 		return nil
 	}
